@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
 	"sync"
@@ -38,11 +39,17 @@ server {
     }
 }
 {{end}}`
-	routesMutex sync.Mutex
-	routes      []Route
+	routesMutex  sync.Mutex
+	routes       []Route
+	certbotEmail string = os.Getenv("CERTBOT_EMAIL")
 )
 
 func main() {
+	if err := startNginx(); err != nil {
+		panic(err)
+	}
+	defer stopNginx()
+
 	dockerClient, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		panic(err)
@@ -58,6 +65,14 @@ func main() {
 	go func() {
 		<-signalChan
 		cancel()
+	}()
+
+	go func() {
+		<-time.After(5 * time.Second)
+		for {
+			certbotRun()
+			<-time.After(24 * time.Hour)
+		}
 	}()
 
 	ticker := time.NewTicker(30 * time.Second)
@@ -153,6 +168,35 @@ func reloadNginx() error {
 }
 
 func executeCommand(name string, args ...string) error {
-	cmd := fmt.Sprintf("%s %s", name, strings.Join(args, " "))
-	return syscall.Exec(cmd, append([]string{name}, args...), os.Environ())
+	cmd := exec.Command(name, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return errors.Join(errors.New("Error executing command"), err)
+	}
+	return nil
+}
+
+func startNginx() error {
+	nginxCmd := exec.Command("nginx")
+	nginxCmd.Stdout = os.Stdout
+	nginxCmd.Stderr = os.Stderr
+	if err := nginxCmd.Run(); err != nil {
+		return errors.Join(errors.New("Error starting Nginx"), err)
+	}
+	return nil
+}
+
+func stopNginx() error {
+	if err := executeCommand("nginx", "-s", "stop"); err != nil {
+		return errors.Join(errors.New("Error stopping Nginx"), err)
+	}
+	return nil
+}
+
+func certbotRun() error {
+	if err := executeCommand("certbot", "--nginx", "--non-interactive", "--agree-tos", "--email", certbotEmail); err != nil {
+		return errors.Join(errors.New("Error starting certbot"), err)
+	}
+	return nil
 }
