@@ -8,6 +8,7 @@ RUN apk add --no-cache certbot certbot-nginx bash
 COPY --from=builder /app/reprox /usr/bin/reprox
 VOLUME ["/etc/letsencrypt"]
 EXPOSE 80 443
+COPY nginx.conf /etc/nginx/nginx.conf
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN chmod +x /entrypoint.sh && rm /etc/nginx/conf.d/default.conf
 ENTRYPOINT ["/entrypoint.sh"]

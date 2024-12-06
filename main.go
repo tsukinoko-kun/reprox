@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	_ "embed"
 	"errors"
 	"fmt"
 	"os"
@@ -41,15 +40,9 @@ server {
 {{end}}`
 	routesMutex sync.Mutex
 	routes      []Route
-	//go:embed nginx.conf
-	nginxConf []byte
 )
 
 func main() {
-	if err := os.WriteFile("/etc/nginx/default.conf", nginxConf, 0644); err != nil {
-		panic(err)
-	}
-
 	dockerClient, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		panic(err)
