@@ -27,6 +27,7 @@ var (
 server {
     listen 80;
     server_name {{.Host}};
+    http2 on;
     location / {
         proxy_pass http://{{.Upstream}};
         proxy_http_version 1.1;
@@ -34,7 +35,6 @@ server {
         proxy_set_header Connection 'upgrade';
         proxy_set_header Host $host;
         proxy_cache_bypass $http_upgrade;
-        keepalive 64;
     }
 }
 {{end}}`
