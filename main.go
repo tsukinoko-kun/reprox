@@ -67,11 +67,19 @@ func main() {
 		cancel()
 	}()
 
+	if err := updateRoutes(ctx, dockerClient); err != nil {
+		fmt.Println("Error updating routes:", err)
+	}
+
 	go func() {
 		<-time.After(5 * time.Second)
 		for {
-			certbotRun()
-			<-time.After(24 * time.Hour)
+			if err := certbotRun(); err != nil {
+				fmt.Println("Error running certbot:", err)
+				<-time.After(5 * time.Minute)
+			} else {
+				<-time.After(24 * time.Hour)
+			}
 		}
 	}()
 
@@ -169,10 +177,9 @@ func reloadNginx() error {
 
 func executeCommand(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return errors.Join(errors.New("Error executing command"), err)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return errors.Join(errors.New("Error executing command"), errors.New(string(out)), err)
 	}
 	return nil
 }
@@ -195,8 +202,27 @@ func stopNginx() error {
 }
 
 func certbotRun() error {
-	if err := executeCommand("certbot", "--nginx", "--non-interactive", "--agree-tos", "--email", certbotEmail); err != nil {
+	if len(routes) == 0 {
+		return errors.New("No routes to request certificates for")
+	}
+
+	if err := executeCommand(
+		"certbot",
+		"--nginx",
+		"--non-interactive",
+		"--agree-tos",
+		"--email", certbotEmail,
+		"--domains", strings.Join(mapSlice(routes, func(route Route) string { return route.Host }), ","),
+	); err != nil {
 		return errors.Join(errors.New("Error starting certbot"), err)
 	}
 	return nil
+}
+
+func mapSlice[T any, U any](s []T, f func(T) U) []U {
+	result := make([]U, len(s))
+	for i, v := range s {
+		result[i] = f(v)
+	}
+	return result
 }
