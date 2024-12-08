@@ -64,17 +64,6 @@ server {
 )
 
 func main() {
-	if err := startNginx(); err != nil {
-		panic(err)
-	}
-	defer stopNginx()
-
-	dockerClient, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
-	if err != nil {
-		panic(err)
-	}
-	defer dockerClient.Close()
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -86,9 +75,20 @@ func main() {
 		cancel()
 	}()
 
-	if err := updateRoutes(ctx, dockerClient); err != nil {
+	dockerClient, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	if err != nil {
+		panic(err)
+	}
+	defer dockerClient.Close()
+
+	if err := generateRoutes(ctx, dockerClient); err != nil {
 		fmt.Println("Error updating routes:", err)
 	}
+
+	if err := nginxStart(); err != nil {
+		fmt.Println("Error starting Nginx:", err)
+	}
+	defer nginxStop()
 
 	c := cron.New()
 	if _, err := c.AddFunc("0 0 * * *", CertbotRun); err != nil {
@@ -96,7 +96,7 @@ func main() {
 	}
 
 	go func() {
-		<-time.After(5 * time.Second)
+		<-time.After(10 * time.Second)
 		CertbotRun()
 	}()
 
@@ -106,10 +106,21 @@ func main() {
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			break
 		case <-ticker.C:
-			if err := updateRoutes(ctx, dockerClient); err != nil {
+			if err := generateRoutes(ctx, dockerClient); err != nil {
 				fmt.Println("Error updating routes:", err)
+			}
+			if err := reloadNginx(); err != nil {
+				fmt.Println("Error reloading Nginx:", err)
+			}
+			<-time.After(time.Second)
+			if err := certbotRun(); err != nil {
+				fmt.Println("Error running certbot:", err)
+			}
+			<-time.After(time.Second)
+			if err := reloadNginx(); err != nil {
+				fmt.Println("Error reloading Nginx:", err)
 			}
 		}
 	}
@@ -123,7 +134,7 @@ func CertbotRun() {
 	}
 }
 
-func updateRoutes(ctx context.Context, dockerClient *client.Client) error {
+func generateRoutes(ctx context.Context, dockerClient *client.Client) error {
 	containers, err := dockerClient.ContainerList(ctx, container.ListOptions{})
 	if err != nil {
 		return errors.Join(errors.New("Error listing containers"), err)
@@ -161,15 +172,6 @@ func updateRoutes(ctx context.Context, dockerClient *client.Client) error {
 
 	if err := writeConfig(); err != nil {
 		return errors.Join(errors.New("Error writing config"), err)
-	}
-
-	if err := reloadNginx(); err != nil {
-		return errors.Join(errors.New("Error reloading Nginx"), err)
-	}
-
-	// run certbot to request certificates for new routes
-	if err := certbotRun(); err != nil {
-		return errors.Join(errors.New("Error running certbot"), err)
 	}
 
 	return nil
@@ -221,7 +223,7 @@ func executeCommand(name string, args ...string) error {
 	return nil
 }
 
-func startNginx() error {
+func nginxStart() error {
 	nginxCmd := exec.Command("nginx")
 	nginxCmd.Stdout = os.Stdout
 	nginxCmd.Stderr = os.Stderr
@@ -231,7 +233,7 @@ func startNginx() error {
 	return nil
 }
 
-func stopNginx() error {
+func nginxStop() error {
 	if err := executeCommand("nginx", "-s", "stop"); err != nil {
 		return errors.Join(errors.New("Error stopping Nginx"), err)
 	}
@@ -263,6 +265,9 @@ func certbotRun() error {
 // If certbot has not been run for the host, this function will generate a new self-signed certificate to make sure the server can start.
 // If there is a certificate, it will do nothing.
 func ensureCertificate(host string) error {
+	if err := os.MkdirAll("/etc/letsencrypt/live/"+host, 0777); err != nil {
+		return errors.Join(errors.New("Error creating directory"), err)
+	}
 	if !exists("/etc/letsencrypt/live/"+host+"/fullchain.pem") || !exists("/etc/letsencrypt/live/"+host+"/privkey.pem") {
 		// generate self-signed certificate using openssl that is valid for 1 hour
 		if err := executeCommand(
