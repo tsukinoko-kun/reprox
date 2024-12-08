@@ -16,6 +16,7 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
+	"github.com/robfig/cron/v3"
 )
 
 type Route struct {
@@ -27,8 +28,26 @@ var (
 	configTemplate = `{{range .}}
 server {
     listen 80;
+    listen [::]:80;
     server_name {{.Host}};
-    http2 on;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name {{.Host}};
+
+    ssl_certificate /etc/letsencrypt/live/{{.Host}}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{{.Host}}/privkey.pem;
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers EECDH+AESGCM:EECDH+CHACHA20:EDH+AESGCM;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1h;
+    ssl_session_tickets off;
+
     location / {
         proxy_pass http://{{.Upstream}};
         proxy_http_version 1.1;
@@ -71,16 +90,14 @@ func main() {
 		fmt.Println("Error updating routes:", err)
 	}
 
+	c := cron.New()
+	if _, err := c.AddFunc("0 0 * * *", CertbotRun); err != nil {
+		panic(fmt.Sprintf("failed to add cron job: %v", err))
+	}
+
 	go func() {
 		<-time.After(5 * time.Second)
-		for {
-			if err := certbotRun(); err != nil {
-				fmt.Println("Error running certbot:", err)
-				<-time.After(5 * time.Minute)
-			} else {
-				<-time.After(24 * time.Hour)
-			}
-		}
+		CertbotRun()
 	}()
 
 	ticker := time.NewTicker(30 * time.Second)
@@ -95,6 +112,14 @@ func main() {
 				fmt.Println("Error updating routes:", err)
 			}
 		}
+	}
+}
+
+func CertbotRun() {
+	if err := certbotRun(); err != nil {
+		fmt.Println("Error running certbot:", err)
+	} else {
+		fmt.Println("Certbot run successful")
 	}
 }
 
@@ -127,12 +152,24 @@ func updateRoutes(ctx context.Context, dockerClient *client.Client) error {
 	}
 	routes = newRoutes
 
+	// Ensure certificates are available for all routes
+	for _, route := range routes {
+		if err := ensureCertificate(route.Host); err != nil {
+			return errors.Join(errors.New("Error ensuring certificate"), err)
+		}
+	}
+
 	if err := writeConfig(); err != nil {
 		return errors.Join(errors.New("Error writing config"), err)
 	}
 
 	if err := reloadNginx(); err != nil {
 		return errors.Join(errors.New("Error reloading Nginx"), err)
+	}
+
+	// run certbot to request certificates for new routes
+	if err := certbotRun(); err != nil {
+		return errors.Join(errors.New("Error running certbot"), err)
 	}
 
 	return nil
@@ -206,23 +243,46 @@ func certbotRun() error {
 		return errors.New("No routes to request certificates for")
 	}
 
-	if err := executeCommand(
-		"certbot",
-		"--nginx",
-		"--non-interactive",
-		"--agree-tos",
-		"--email", certbotEmail,
-		"--domains", strings.Join(mapSlice(routes, func(route Route) string { return route.Host }), ","),
-	); err != nil {
-		return errors.Join(errors.New("Error starting certbot"), err)
+	for _, route := range routes {
+		if err := executeCommand(
+			"certbot",
+			"--nginx",
+			"--non-interactive",
+			"--agree-tos",
+			"--email", certbotEmail,
+			"--domains", route.Host,
+		); err != nil {
+			return errors.Join(errors.New("Error starting certbot"), err)
+		}
+	}
+
+	return nil
+}
+
+// ensureCertificate ensures that a certificate is available for the given host.
+// If certbot has not been run for the host, this function will generate a new self-signed certificate to make sure the server can start.
+// If there is a certificate, it will do nothing.
+func ensureCertificate(host string) error {
+	if !exists("/etc/letsencrypt/live/"+host+"/fullchain.pem") || !exists("/etc/letsencrypt/live/"+host+"/privkey.pem") {
+		// generate self-signed certificate using openssl that is valid for 1 hour
+		if err := executeCommand(
+			"openssl",
+			"req",
+			"-x509",
+			"-newkey", "rsa:4096",
+			"-keyout", "/etc/letsencrypt/live/"+host+"/privkey.pem",
+			"-out", "/etc/letsencrypt/live/"+host+"/fullchain.pem",
+			"-days", "1",
+			"-nodes",
+			"-subj", "/CN="+host,
+		); err != nil {
+			return errors.Join(errors.New("Error generating self-signed certificate"), err)
+		}
 	}
 	return nil
 }
 
-func mapSlice[T any, U any](s []T, f func(T) U) []U {
-	result := make([]U, len(s))
-	for i, v := range s {
-		result[i] = f(v)
-	}
-	return result
+func exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }

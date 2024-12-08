@@ -4,7 +4,7 @@ COPY . /app
 RUN go build -o reprox .
 
 FROM nginx:alpine
-RUN apk add --no-cache certbot certbot-nginx bash
+RUN apk add --no-cache certbot certbot-nginx bash openssl
 COPY --from=builder /app/reprox /usr/bin/reprox
 VOLUME ["/etc/letsencrypt"]
 EXPOSE 80 443
